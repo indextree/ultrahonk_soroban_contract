@@ -5,16 +5,16 @@ use alloc::{boxed::Box, string::String as StdString, vec::Vec as StdVec};
 use soroban_sdk::{
     contract, contracterror, contractimpl,
     crypto::bn254::{Fr as HostFr, G1Affine as HostG1Affine, G2Affine as HostG2Affine},
-    symbol_short, Bytes, BytesN, Env, Symbol, Vec as SorobanVec,
+    symbol_short, Bytes, BytesN, Env, Symbol, Vec as SorobanVec, U256,
 };
 
 use ark_bn254::{Fq, Fq2, G1Affine as ArkG1Affine, G2Affine as ArkG2Affine};
-use ark_ff::{PrimeField, Zero};
+use ark_ff::{BigInteger, PrimeField, Zero};
 
 use ultrahonk_rust_verifier::{
     ec::{self, Bn254Ops},
     field::Fr as ArkFr,
-    hash::{self, HashOps},
+    hash::{self, HashInput, HashOps},
     types::{G1Point, VerificationKey},
     UltraHonkVerifier,
 };
@@ -639,11 +639,71 @@ impl SorobanKeccak {
 }
 
 impl HashOps for SorobanKeccak {
-    fn hash(&self, data: &[u8]) -> [u8; 32] {
+    fn hash(&self, data: &HashInput) -> [u8; 32] {
         let env = self.env.clone();
-        let input = Bytes::from_slice(&env, data);
+        let input = Bytes::from_slice(&env, data.bytes);
         let digest: BytesN<32> = env.crypto().keccak256(&input).into();
         digest.into()
+    }
+}
+
+struct SorobanPoseidon2 {
+    env: Env,
+}
+
+impl SorobanPoseidon2 {
+    fn new(env: &Env) -> Self {
+        Self { env: env.clone() }
+    }
+
+    fn bytes_to_field_elements(&self, data: &[u8]) -> SorobanVec<U256> {
+        let vec_env = self.env.clone();
+        let mut inputs = SorobanVec::new(&vec_env);
+        if data.is_empty() {
+            return inputs;
+        }
+        for chunk in data.chunks(32) {
+            let mut buf = [0u8; 32];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            buf.reverse();
+            let bytes = Bytes::from_array(&vec_env, &buf);
+            let field_elem = U256::from_be_bytes(&vec_env, &bytes);
+            inputs.push_back(field_elem);
+        }
+        inputs
+    }
+
+    fn fields_to_host(&self, fields: &[ArkFr]) -> SorobanVec<U256> {
+        let env = self.env.clone();
+        let mut inputs = SorobanVec::new(&env);
+        for fr in fields {
+            let bytes = Bytes::from_array(&env, &fr.to_bytes());
+            inputs.push_back(U256::from_be_bytes(&env, &bytes));
+        }
+        inputs
+    }
+}
+
+unsafe impl Send for SorobanPoseidon2 {}
+unsafe impl Sync for SorobanPoseidon2 {}
+
+impl HashOps for SorobanPoseidon2 {
+    fn hash(&self, data: &HashInput) -> [u8; 32] {
+        let env = self.env.clone();
+        let mut inputs = if !data.fields.is_empty() {
+            self.fields_to_host(data.fields)
+        } else {
+            self.bytes_to_field_elements(data.bytes)
+        };
+        if inputs.is_empty() {
+            inputs.push_back(U256::from_u32(&env, 0));
+        }
+        let field = symbol_short!("BN254");
+        let digest = env.crypto().poseidon2_hash(&inputs, field);
+        let bytes = digest.to_be_bytes();
+        let mut out = [0u8; 32];
+        bytes.copy_into_slice(&mut out);
+        out
     }
 }
 
@@ -715,6 +775,25 @@ pub enum Error {
     VkNotSet = 4,
 }
 
+#[derive(Copy, Clone)]
+enum TranscriptHash {
+    Keccak,
+    Poseidon2,
+}
+
+impl TranscriptHash {
+    fn install_backend(self, env: &Env) {
+        match self {
+            TranscriptHash::Keccak => {
+                hash::set_soroban_hash_backend(Box::new(SorobanKeccak::new(env)));
+            }
+            TranscriptHash::Poseidon2 => {
+                hash::set_soroban_hash_backend(Box::new(SorobanPoseidon2::new(env)));
+            }
+        }
+    }
+}
+
 #[contractimpl]
 impl UltraHonkVerifierContract {
     fn key_vk() -> Symbol {
@@ -751,9 +830,13 @@ impl UltraHonkVerifierContract {
         }
         (StdVec::new(), rest.to_vec())
     }
-    /// Verify an UltraHonk proof.
-    pub fn verify_proof(env: Env, vk_bytes: Bytes, proof_blob: Bytes) -> Result<(), Error> {
-        hash::set_soroban_hash_backend(Box::new(SorobanKeccak::new(&env)));
+    fn verify_proof_with_hash(
+        env: Env,
+        vk_bytes: Bytes,
+        proof_blob: Bytes,
+        hash_method: TranscriptHash,
+    ) -> Result<(), Error> {
+        hash_method.install_backend(&env);
         ec::set_soroban_bn254_backend(Box::new(SorobanBn254::new(&env)));
         let proof_vec: StdVec<u8> = proof_blob.to_alloc_vec();
 
@@ -774,6 +857,16 @@ impl UltraHonkVerifierContract {
         Ok(())
     }
 
+    /// Verify an UltraHonk proof using Keccak transcript (default).
+    pub fn verify_proof(env: Env, vk_bytes: Bytes, proof_blob: Bytes) -> Result<(), Error> {
+        Self::verify_proof_with_hash(env, vk_bytes, proof_blob, TranscriptHash::Keccak)
+    }
+
+    /// Verify an UltraHonk proof using Poseidon2 transcript hash.
+    pub fn verify_proof_poseidon2(env: Env, vk_bytes: Bytes, proof_blob: Bytes) -> Result<(), Error> {
+        Self::verify_proof_with_hash(env, vk_bytes, proof_blob, TranscriptHash::Poseidon2)
+    }
+
     /// Set preprocessed verification key bytes and cache its hash. Returns vk_hash
     pub fn set_vk(env: Env, vk_bytes: Bytes) -> Result<BytesN<32>, Error> {
         env.storage().instance().set(&Self::key_vk(), &vk_bytes);
@@ -790,5 +883,15 @@ impl UltraHonkVerifierContract {
             .get(&Self::key_vk())
             .ok_or(Error::VkNotSet)?;
         Self::verify_proof(env, vk_bytes, proof_blob)
+    }
+
+    /// Verify using stored VK with Poseidon2 transcript hash.
+    pub fn verify_poseidon2_with_stored_vk(env: Env, proof_blob: Bytes) -> Result<(), Error> {
+        let vk_bytes: Bytes = env
+            .storage()
+            .instance()
+            .get(&Self::key_vk())
+            .ok_or(Error::VkNotSet)?;
+        Self::verify_proof_poseidon2(env, vk_bytes, proof_blob)
     }
 }

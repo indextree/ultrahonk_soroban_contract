@@ -390,7 +390,8 @@ async function commandInvoke(args: any): Promise<number> {
     }
 
     const verifyArgs = ['--vk-json', vkHex, '--proof-blob', proofHex];
-    const result = await invokeWithVariants(baseCmd, 'verify_proof', verifyArgs, args.dry_run);
+    const fnName = args.hash === 'poseidon2' ? 'verify_proof_poseidon2' : 'verify_proof';
+    const result = await invokeWithVariants(baseCmd, fnName, verifyArgs, args.dry_run);
     if (result.returncode !== 0) {
       return result.returncode;
     }
@@ -519,6 +520,11 @@ function buildParser(): ArgumentParser {
   invoke.add_argument('--cost', {
     action: 'store_true',
     help: 'Include `--cost` when calling stellar CLI.',
+  });
+  invoke.add_argument('--hash', {
+    choices: ['keccak', 'poseidon2'],
+    default: 'keccak',
+    help: 'Transcript hash function to use (default: keccak).',
   });
   invoke.add_argument('--proof-blob-file', {
     type: 'str',
