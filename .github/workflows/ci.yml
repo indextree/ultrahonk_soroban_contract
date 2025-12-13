@@ -32,6 +32,9 @@ jobs:
       - name: Build root circuits
         run: tests/build_circuits.sh
 
+      - name: Build Poseidon2 circuits
+        run: tests/build_poseidon2_circuits.sh
+
       - name: Build tornado circuits
         run: tornado_classic/circuit/scripts/gen_artifacts.sh
 
