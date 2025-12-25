@@ -59,7 +59,7 @@ pub(crate) fn host_g1_to_ark(pt: &HostG1Affine) -> Result<ArkG1Affine, StdString
     if aff.is_on_curve() && aff.is_in_correct_subgroup_assuming_on_curve() {
         Ok(aff)
     } else {
-        Err("invalid g1 point: not on curve or wrong subgroup".into())
+        Err("g1_invalid".into())
     }
 }
 
@@ -130,7 +130,7 @@ impl SorobanBn254 {
 impl Bn254Ops for SorobanBn254 {
     fn g1_msm(&self, coms: &[G1Point], scalars: &[ArkFr]) -> Result<ArkG1Affine, StdString> {
         if coms.len() != scalars.len() {
-            return Err("msm input length mismatch".into());
+            return Err("msm_len".into());
         }
         let env = self.env();
         let bn = env.crypto().bn254();
