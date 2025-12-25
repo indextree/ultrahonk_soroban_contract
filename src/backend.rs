@@ -59,7 +59,7 @@ pub(crate) fn host_g1_to_ark(pt: &HostG1Affine) -> Result<ArkG1Affine, StdString
     if aff.is_on_curve() && aff.is_in_correct_subgroup_assuming_on_curve() {
         Ok(aff)
     } else {
-        Err("g1".into())
+        Err("g1 invalid".into())
     }
 }
 
